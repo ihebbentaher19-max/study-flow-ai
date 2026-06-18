@@ -56,6 +56,91 @@ export const generateSummary = createServerFn({ method: "POST" })
     return row;
   });
 
+// ---------- Summarize from uploaded file (image/PDF) ----------
+const UploadSummarizeInput = z.object({
+  title: z.string().min(1).max(200),
+  storage_path: z.string().min(1).max(500),
+  mime_type: z.string().min(1).max(100),
+});
+
+export const summarizeFromUpload = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => UploadSummarizeInput.parse(d))
+  .handler(async ({ data, context }) => {
+    // Download the file with the user's RLS-scoped client
+    const dl = await context.supabase.storage.from("study-uploads").download(data.storage_path);
+    if (dl.error || !dl.data) throw new Error(dl.error?.message ?? "Could not read uploaded file");
+    const buf = Buffer.from(await dl.data.arrayBuffer());
+    const base64 = buf.toString("base64");
+
+    const isImage = data.mime_type.startsWith("image/");
+    const isPdf = data.mime_type === "application/pdf";
+    const isText = data.mime_type.startsWith("text/");
+
+    const key = process.env.LOVABLE_API_KEY;
+    if (!key) throw new Error("LOVABLE_API_KEY missing");
+
+    const systemPrompt = `You are StudyFlow's AI tutor. Read the provided study material and return ONLY a JSON object matching this exact shape: {"summary": string (3-5 short paragraphs, student-friendly), "key_points": string[] (5-7 crisp takeaways)}. No prose outside JSON.`;
+
+    let userContent: any[];
+    if (isImage) {
+      userContent = [
+        { type: "text", text: `Title: ${data.title}\nExtract the study content from this image and summarize it as instructed.` },
+        { type: "image_url", image_url: { url: `data:${data.mime_type};base64,${base64}` } },
+      ];
+    } else if (isPdf) {
+      userContent = [
+        { type: "text", text: `Title: ${data.title}\nRead this PDF and summarize as instructed.` },
+        { type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${base64}` } },
+      ];
+    } else if (isText) {
+      const textBody = buf.toString("utf-8").slice(0, 20000);
+      userContent = [{ type: "text", text: `Title: ${data.title}\n\nNOTES:\n${textBody}` }];
+    } else {
+      throw new Error("Unsupported file type");
+    }
+
+    const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Lovable-API-Key": key },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!res.ok) throw new Error(`AI gateway error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    const raw = json.choices?.[0]?.message?.content ?? "{}";
+    const cleaned = raw.replace(/^```json\s*|\s*```$/g, "").trim();
+    const parsed = JSON.parse(cleaned);
+    const out = z.object({
+      summary: z.string(),
+      key_points: z.array(z.string()).min(1).max(12),
+    }).parse(parsed);
+
+    const { data: row, error } = await context.supabase
+      .from("summaries")
+      .insert({
+        user_id: context.userId,
+        title: data.title,
+        source_text: `[uploaded:${data.mime_type}] ${data.storage_path}`,
+        summary: out.summary,
+        key_points: out.key_points,
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+
+    await context.supabase.from("study_sessions").insert({
+      user_id: context.userId, activity: "summary_upload", minutes: 5, xp: 20,
+    });
+    return row;
+  });
+
 // ---------- Quiz ----------
 const QuizInput = z.object({
   topic: z.string().min(1).max(200),
