@@ -14,16 +14,228 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      flashcard_decks: {
+        Row: {
+          cards: Json
+          created_at: string
+          id: string
+          title: string
+          topic: string | null
+          user_id: string
+        }
+        Insert: {
+          cards: Json
+          created_at?: string
+          id?: string
+          title: string
+          topic?: string | null
+          user_id: string
+        }
+        Update: {
+          cards?: Json
+          created_at?: string
+          id?: string
+          title?: string
+          topic?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          avatar_url: string | null
+          bio: string | null
+          created_at: string
+          full_name: string | null
+          id: string
+          last_active_date: string | null
+          streak_days: number
+          updated_at: string
+        }
+        Insert: {
+          avatar_url?: string | null
+          bio?: string | null
+          created_at?: string
+          full_name?: string | null
+          id: string
+          last_active_date?: string | null
+          streak_days?: number
+          updated_at?: string
+        }
+        Update: {
+          avatar_url?: string | null
+          bio?: string | null
+          created_at?: string
+          full_name?: string | null
+          id?: string
+          last_active_date?: string | null
+          streak_days?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      quizzes: {
+        Row: {
+          attempts: number
+          best_score: number | null
+          created_at: string
+          id: string
+          questions: Json
+          title: string
+          topic: string | null
+          user_id: string
+        }
+        Insert: {
+          attempts?: number
+          best_score?: number | null
+          created_at?: string
+          id?: string
+          questions: Json
+          title: string
+          topic?: string | null
+          user_id: string
+        }
+        Update: {
+          attempts?: number
+          best_score?: number | null
+          created_at?: string
+          id?: string
+          questions?: Json
+          title?: string
+          topic?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      study_sessions: {
+        Row: {
+          activity: string
+          id: string
+          minutes: number
+          occurred_at: string
+          user_id: string
+          xp: number
+        }
+        Insert: {
+          activity: string
+          id?: string
+          minutes?: number
+          occurred_at?: string
+          user_id: string
+          xp?: number
+        }
+        Update: {
+          activity?: string
+          id?: string
+          minutes?: number
+          occurred_at?: string
+          user_id?: string
+          xp?: number
+        }
+        Relationships: []
+      }
+      study_tasks: {
+        Row: {
+          completed: boolean
+          completed_at: string | null
+          created_at: string
+          description: string | null
+          due_date: string | null
+          duration_minutes: number | null
+          id: string
+          subject: string | null
+          title: string
+          user_id: string
+        }
+        Insert: {
+          completed?: boolean
+          completed_at?: string | null
+          created_at?: string
+          description?: string | null
+          due_date?: string | null
+          duration_minutes?: number | null
+          id?: string
+          subject?: string | null
+          title: string
+          user_id: string
+        }
+        Update: {
+          completed?: boolean
+          completed_at?: string | null
+          created_at?: string
+          description?: string | null
+          due_date?: string | null
+          duration_minutes?: number | null
+          id?: string
+          subject?: string | null
+          title?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      summaries: {
+        Row: {
+          created_at: string
+          id: string
+          key_points: Json | null
+          source_text: string
+          summary: string
+          title: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          key_points?: Json | null
+          source_text: string
+          summary: string
+          title: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          key_points?: Json | null
+          source_text?: string
+          summary?: string
+          title?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      user_roles: {
+        Row: {
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin" | "student"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +362,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin", "student"],
+    },
   },
 } as const
