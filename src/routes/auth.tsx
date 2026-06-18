@@ -1,8 +1,8 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { Sparkles, Mail, Lock, User2, ArrowRight } from "lucide-react";
+import { Sparkles, Mail, Lock, User2, ArrowRight, Check } from "lucide-react";
 import { motion } from "framer-motion";
 
 export const Route = createFileRoute("/auth")({
@@ -91,7 +91,17 @@ function AuthPage() {
               <Field icon={<User2 className="size-4" />} placeholder="Your name" value={name} onChange={setName} />
             )}
             <Field icon={<Mail className="size-4" />} type="email" placeholder="you@email.com" value={email} onChange={setEmail} required />
-            <Field icon={<Lock className="size-4" />} type="password" placeholder="••••••••" value={password} onChange={setPassword} required minLength={6} />
+            <Field
+              icon={<Lock className="size-4" />}
+              type="password"
+              autoComplete={mode === "signup" ? "new-password" : "current-password"}
+              placeholder="••••••••"
+              value={password}
+              onChange={setPassword}
+              required
+              minLength={6}
+            />
+            {mode === "signup" && <PasswordStrength password={password} />}
             <button
               type="submit"
               disabled={loading}
@@ -107,9 +117,48 @@ function AuthPage() {
           </div>
           <div className="mt-4 grid grid-cols-2 gap-3">
             <button type="button" onClick={() => toast("Coming soon")} className="rounded-full border border-border bg-card font-semibold py-2.5 hover:bg-muted">Google</button>
-            <button type="button" onClick={() => toast("Coming soon")} className="rounded-full border border-border bg-card font-semibold py-2.5 hover:bg-muted">Apple</button>
+            <button type="button" onClick={() => toast("Coming soon")} className_="rounded-full border border-border bg-card font-semibold py-2.5 hover:bg-muted">Apple</button>
           </div>
         </motion.div>
+      </div>
+    </div>
+  );
+}
+
+function PasswordStrength({ password }: { password: string }) {
+  const checks = useMemo(() => {
+    return {
+      length: password.length >= 8,
+      lower: /[a-z]/.test(password),
+      upper: /[A-Z]/.test(password),
+      number: /\d/.test(password),
+      special: /[^A-Za-z0-9]/.test(password),
+    };
+  }, [password]);
+
+  const passed = Object.values(checks).filter(Boolean).length;
+  const strengthLabels = ["Too weak", "Weak", "Fair", "Good", "Great"];
+  const strengthColors = ["bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-lime-500", "bg-emerald-500"];
+  const label = strengthLabels[Math.max(0, passed - 1)] || "Too weak";
+  const color = strengthColors[Math.max(0, passed - 1)] || "bg-red-500";
+
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-1">
+        {[1, 2, 3, 4, 5].map((i) => (
+          <div
+            key={i}
+            className={`h-1.5 flex-1 rounded-full transition-colors ${i <= passed ? color : "bg-muted"}`}
+          />
+        ))}
+      </div>
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-muted-foreground font-medium">{label}</span>
+        <div className="flex gap-2 text-muted-foreground/70">
+          <span className={checks.length ? "text-emerald-500" : ""}>8+ chars</span>
+          <span className={checks.number ? "text-emerald-500" : ""}>Number</span>
+          <span className={checks.special ? "text-emerald-500" : ""}>Symbol</span>
+        </div>
       </div>
     </div>
   );
@@ -120,6 +169,7 @@ type FieldProps = {
   value: string;
   onChange: (v: string) => void;
   type?: string;
+  autoComplete?: string;
   placeholder?: string;
   required?: boolean;
   minLength?: number;
