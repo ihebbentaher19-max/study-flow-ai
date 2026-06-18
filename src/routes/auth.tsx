@@ -117,7 +117,7 @@ function AuthPage() {
           </div>
           <div className="mt-4 grid grid-cols-2 gap-3">
             <button type="button" onClick={() => toast("Coming soon")} className="rounded-full border border-border bg-card font-semibold py-2.5 hover:bg-muted">Google</button>
-            <button type="button" onClick={() => toast("Coming soon")} className_="rounded-full border border-border bg-card font-semibold py-2.5 hover:bg-muted">Apple</button>
+            <button type="button" onClick={() => toast("Coming soon")} className="rounded-full border border-border bg-card font-semibold py-2.5 hover:bg-muted">Apple</button>
           </div>
         </motion.div>
       </div>
