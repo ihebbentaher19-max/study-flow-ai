@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { generateText, Output } from "ai";
+import { generateText } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 
@@ -10,6 +10,95 @@ function getGateway() {
   const key = process.env.LOVABLE_API_KEY;
   if (!key) throw new Error("LOVABLE_API_KEY missing");
   return createLovableAiGatewayProvider(key);
+}
+
+function getKey() {
+  const key = process.env.LOVABLE_API_KEY;
+  if (!key) throw new Error("LOVABLE_API_KEY missing");
+  return key;
+}
+
+// ---------- Robust JSON extraction ----------
+function extractJson(raw: string): any {
+  let s = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+  const startObj = s.indexOf("{");
+  const startArr = s.indexOf("[");
+  let start = -1;
+  let endChar = "}";
+  if (startObj === -1 && startArr === -1) throw new Error("No JSON in response");
+  if (startObj === -1 || (startArr !== -1 && startArr < startObj)) { start = startArr; endChar = "]"; }
+  else { start = startObj; endChar = "}"; }
+  const end = s.lastIndexOf(endChar);
+  if (end === -1 || end < start) throw new Error("Malformed JSON in response");
+  s = s.substring(start, end + 1);
+  try { return JSON.parse(s); } catch {
+    const cleaned = s
+      .replace(/,\s*}/g, "}")
+      .replace(/,\s*]/g, "]")
+      .replace(/[\x00-\x1F\x7F]/g, "");
+    return JSON.parse(cleaned);
+  }
+}
+
+// ---------- Multimodal user-content builder ----------
+async function buildUserContent(opts: {
+  title: string;
+  instructionPrefix: string;
+  text?: string;
+  storage_path?: string;
+  mime_type?: string;
+  supabase: any;
+}) {
+  if (opts.storage_path && opts.mime_type) {
+    const dl = await opts.supabase.storage.from("study-uploads").download(opts.storage_path);
+    if (dl.error || !dl.data) throw new Error(dl.error?.message ?? "Could not read uploaded file");
+    const buf = Buffer.from(await dl.data.arrayBuffer());
+    const base64 = buf.toString("base64");
+    const mt = opts.mime_type;
+    if (mt.startsWith("image/")) {
+      return [
+        { type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix} Extract content from this image.` },
+        { type: "image_url", image_url: { url: `data:${mt};base64,${base64}` } },
+      ];
+    }
+    if (mt === "application/pdf") {
+      return [
+        { type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix} Read this PDF.` },
+        { type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${base64}` } },
+      ];
+    }
+    if (mt.startsWith("text/")) {
+      const body = buf.toString("utf-8").slice(0, 20000);
+      return [{ type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix}\n\nNOTES:\n${body}` }];
+    }
+    throw new Error("Unsupported file type");
+  }
+  if (!opts.text || opts.text.length < 20) throw new Error("Provide notes or attach a file");
+  return [{ type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix}\n\nNOTES:\n${opts.text.slice(0, 20000)}` }];
+}
+
+async function callJsonAI(systemPrompt: string, userContent: any[]) {
+  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Lovable-API-Key": getKey() },
+    body: JSON.stringify({
+      model: MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      response_format: { type: "json_object" },
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    if (res.status === 429) throw new Error("Rate limit reached. Please try again shortly.");
+    if (res.status === 402) throw new Error("AI credits exhausted. Please add credits in workspace billing.");
+    throw new Error(`AI error ${res.status}: ${txt.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  const raw = json.choices?.[0]?.message?.content ?? "{}";
+  return extractJson(raw);
 }
 
 // ---------- Summarize ----------
@@ -22,17 +111,13 @@ export const generateSummary = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => SummarizeInput.parse(d))
   .handler(async ({ data, context }) => {
-    const gateway = getGateway();
-    const { experimental_output } = await generateText({
-      model: gateway(MODEL),
-      experimental_output: Output.object({
-        schema: z.object({
-          summary: z.string(),
-          key_points: z.array(z.string()).min(3).max(8),
-        }),
-      }),
-      prompt: `You are StudyFlow's AI tutor. Summarize the following study notes into a concise, student-friendly summary (3-5 short paragraphs) and 5-7 crisp key takeaways. Use plain language a student can quickly review.\n\nTITLE: ${data.title}\n\nNOTES:\n${data.text}`,
-    });
+    const systemPrompt = `You are StudyFlow's AI tutor. Return ONLY a JSON object: {"summary": string (3-5 short paragraphs), "key_points": string[] (5-7 takeaways)}. No prose outside JSON.`;
+    const userContent = [{ type: "text", text: `Title: ${data.title}\n\nNOTES:\n${data.text}` }];
+    const parsed = await callJsonAI(systemPrompt, userContent);
+    const out = z.object({
+      summary: z.string(),
+      key_points: z.array(z.string()).min(1).max(12),
+    }).parse(parsed);
 
     const { data: row, error } = await context.supabase
       .from("summaries")
@@ -40,23 +125,20 @@ export const generateSummary = createServerFn({ method: "POST" })
         user_id: context.userId,
         title: data.title,
         source_text: data.text,
-        summary: experimental_output.summary,
-        key_points: experimental_output.key_points,
+        summary: out.summary,
+        key_points: out.key_points,
       })
       .select()
       .single();
     if (error) throw new Error(error.message);
 
     await context.supabase.from("study_sessions").insert({
-      user_id: context.userId,
-      activity: "summary",
-      minutes: 5,
-      xp: 15,
+      user_id: context.userId, activity: "summary", minutes: 5, xp: 15,
     });
     return row;
   });
 
-// ---------- Summarize from uploaded file (image/PDF) ----------
+// ---------- Summarize from uploaded file ----------
 const UploadSummarizeInput = z.object({
   title: z.string().min(1).max(200),
   storage_path: z.string().min(1).max(500),
@@ -67,56 +149,15 @@ export const summarizeFromUpload = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => UploadSummarizeInput.parse(d))
   .handler(async ({ data, context }) => {
-    // Download the file with the user's RLS-scoped client
-    const dl = await context.supabase.storage.from("study-uploads").download(data.storage_path);
-    if (dl.error || !dl.data) throw new Error(dl.error?.message ?? "Could not read uploaded file");
-    const buf = Buffer.from(await dl.data.arrayBuffer());
-    const base64 = buf.toString("base64");
-
-    const isImage = data.mime_type.startsWith("image/");
-    const isPdf = data.mime_type === "application/pdf";
-    const isText = data.mime_type.startsWith("text/");
-
-    const key = process.env.LOVABLE_API_KEY;
-    if (!key) throw new Error("LOVABLE_API_KEY missing");
-
-    const systemPrompt = `You are StudyFlow's AI tutor. Read the provided study material and return ONLY a JSON object matching this exact shape: {"summary": string (3-5 short paragraphs, student-friendly), "key_points": string[] (5-7 crisp takeaways)}. No prose outside JSON.`;
-
-    let userContent: any[];
-    if (isImage) {
-      userContent = [
-        { type: "text", text: `Title: ${data.title}\nExtract the study content from this image and summarize it as instructed.` },
-        { type: "image_url", image_url: { url: `data:${data.mime_type};base64,${base64}` } },
-      ];
-    } else if (isPdf) {
-      userContent = [
-        { type: "text", text: `Title: ${data.title}\nRead this PDF and summarize as instructed.` },
-        { type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${base64}` } },
-      ];
-    } else if (isText) {
-      const textBody = buf.toString("utf-8").slice(0, 20000);
-      userContent = [{ type: "text", text: `Title: ${data.title}\n\nNOTES:\n${textBody}` }];
-    } else {
-      throw new Error("Unsupported file type");
-    }
-
-    const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Lovable-API-Key": key },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ],
-        response_format: { type: "json_object" },
-      }),
+    const systemPrompt = `You are StudyFlow's AI tutor. Read the provided study material and return ONLY a JSON object: {"summary": string (3-5 short paragraphs), "key_points": string[] (5-7 takeaways)}. No prose outside JSON.`;
+    const userContent = await buildUserContent({
+      title: data.title,
+      instructionPrefix: "Summarize this study material.",
+      storage_path: data.storage_path,
+      mime_type: data.mime_type,
+      supabase: context.supabase,
     });
-    if (!res.ok) throw new Error(`AI gateway error ${res.status}: ${await res.text()}`);
-    const json = await res.json();
-    const raw = json.choices?.[0]?.message?.content ?? "{}";
-    const cleaned = raw.replace(/^```json\s*|\s*```$/g, "").trim();
-    const parsed = JSON.parse(cleaned);
+    const parsed = await callJsonAI(systemPrompt, userContent);
     const out = z.object({
       summary: z.string(),
       key_points: z.array(z.string()).min(1).max(12),
@@ -144,34 +185,62 @@ export const summarizeFromUpload = createServerFn({ method: "POST" })
 // ---------- Quiz ----------
 const QuizInput = z.object({
   topic: z.string().min(1).max(200),
-  notes: z.string().min(20).max(20000),
+  notes: z.string().max(20000).optional(),
+  storage_path: z.string().max(500).optional(),
+  mime_type: z.string().max(100).optional(),
   count: z.number().int().min(3).max(15).default(6),
 });
+
+const QuizSchema = z.object({
+  questions: z.array(z.object({
+    question: z.string(),
+    choices: z.array(z.string()).min(2).max(6),
+    correct_index: z.number().int().min(0),
+    explanation: z.string().optional().default(""),
+  })).min(1).max(20),
+});
+
+function normalizeQuiz(parsed: any) {
+  // Allow {questions:[...]} or a bare array
+  const arr = Array.isArray(parsed) ? parsed : (parsed.questions ?? parsed.quiz ?? parsed.items ?? []);
+  const cleaned = arr.map((q: any) => {
+    const choices = q.choices ?? q.options ?? q.answers ?? [];
+    let correct = q.correct_index ?? q.correctIndex ?? q.answer_index ?? q.correct;
+    if (typeof correct === "string") {
+      // try letter "A"/"B"/...
+      const letter = correct.trim().toUpperCase();
+      if (/^[A-Z]$/.test(letter)) correct = letter.charCodeAt(0) - 65;
+      else correct = choices.findIndex((c: string) => String(c).trim() === correct);
+    }
+    if (typeof correct !== "number" || correct < 0 || correct >= choices.length) correct = 0;
+    // pad to 4 if fewer than 4
+    while (choices.length < 4) choices.push("None of the above");
+    return {
+      question: String(q.question ?? q.q ?? "").trim(),
+      choices: choices.slice(0, 4).map((c: any) => String(c)),
+      correct_index: Math.min(correct, 3),
+      explanation: String(q.explanation ?? q.rationale ?? ""),
+    };
+  }).filter((q: any) => q.question);
+  return QuizSchema.parse({ questions: cleaned });
+}
 
 export const generateQuiz = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => QuizInput.parse(d))
   .handler(async ({ data, context }) => {
-    const gateway = getGateway();
-    const { experimental_output } = await generateText({
-      model: gateway(MODEL),
-      experimental_output: Output.object({
-        schema: z.object({
-          questions: z
-            .array(
-              z.object({
-                question: z.string(),
-                choices: z.array(z.string()).length(4),
-                correct_index: z.number().int().min(0).max(3),
-                explanation: z.string(),
-              }),
-            )
-            .min(3)
-            .max(15),
-        }),
-      }),
-      prompt: `Generate ${data.count} multiple-choice quiz questions about "${data.topic}" based on these notes. Each question has 4 plausible choices, one correct, and a short explanation. Difficulty: mixed.\n\nNOTES:\n${data.notes}`,
+    const systemPrompt = `You are StudyFlow's quiz generator. Return ONLY JSON: {"questions":[{"question":string,"choices":[string,string,string,string],"correct_index":0-3,"explanation":string}]}. Exactly 4 choices, mixed difficulty. No prose outside JSON.`;
+    const instr = `Generate ${data.count} multiple-choice quiz questions about "${data.topic}".`;
+    const userContent = await buildUserContent({
+      title: data.topic,
+      instructionPrefix: instr,
+      text: data.notes,
+      storage_path: data.storage_path,
+      mime_type: data.mime_type,
+      supabase: context.supabase,
     });
+    const parsed = await callJsonAI(systemPrompt, userContent);
+    const out = normalizeQuiz(parsed);
 
     const { data: row, error } = await context.supabase
       .from("quizzes")
@@ -179,17 +248,14 @@ export const generateQuiz = createServerFn({ method: "POST" })
         user_id: context.userId,
         title: data.topic,
         topic: data.topic,
-        questions: experimental_output.questions,
+        questions: out.questions,
       })
       .select()
       .single();
     if (error) throw new Error(error.message);
 
     await context.supabase.from("study_sessions").insert({
-      user_id: context.userId,
-      activity: "quiz_generated",
-      minutes: 3,
-      xp: 10,
+      user_id: context.userId, activity: "quiz_generated", minutes: 3, xp: 10,
     });
     return row;
   });
@@ -224,27 +290,44 @@ export const recordQuizAttempt = createServerFn({ method: "POST" })
 // ---------- Flashcards ----------
 const DeckInput = z.object({
   topic: z.string().min(1).max(200),
-  notes: z.string().min(20).max(20000),
+  notes: z.string().max(20000).optional(),
+  storage_path: z.string().max(500).optional(),
+  mime_type: z.string().max(100).optional(),
   count: z.number().int().min(4).max(20).default(8),
 });
+
+const DeckSchema = z.object({
+  cards: z.array(z.object({
+    front: z.string(),
+    back: z.string(),
+  })).min(1).max(40),
+});
+
+function normalizeDeck(parsed: any) {
+  const arr = Array.isArray(parsed) ? parsed : (parsed.cards ?? parsed.flashcards ?? parsed.items ?? []);
+  const cleaned = arr.map((c: any) => ({
+    front: String(c.front ?? c.question ?? c.term ?? c.q ?? "").trim(),
+    back: String(c.back ?? c.answer ?? c.definition ?? c.a ?? "").trim(),
+  })).filter((c: any) => c.front && c.back);
+  return DeckSchema.parse({ cards: cleaned });
+}
 
 export const generateDeck = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => DeckInput.parse(d))
   .handler(async ({ data, context }) => {
-    const gateway = getGateway();
-    const { experimental_output } = await generateText({
-      model: gateway(MODEL),
-      experimental_output: Output.object({
-        schema: z.object({
-          cards: z
-            .array(z.object({ front: z.string(), back: z.string() }))
-            .min(4)
-            .max(20),
-        }),
-      }),
-      prompt: `Create ${data.count} concise flashcards for the topic "${data.topic}" from these notes. Front = a question or term, back = a clear short answer or definition.\n\nNOTES:\n${data.notes}`,
+    const systemPrompt = `You are StudyFlow's flashcard generator. Return ONLY JSON: {"cards":[{"front":string,"back":string}]}. Front = question/term, back = clear short answer. No prose outside JSON.`;
+    const instr = `Create ${data.count} concise flashcards for "${data.topic}".`;
+    const userContent = await buildUserContent({
+      title: data.topic,
+      instructionPrefix: instr,
+      text: data.notes,
+      storage_path: data.storage_path,
+      mime_type: data.mime_type,
+      supabase: context.supabase,
     });
+    const parsed = await callJsonAI(systemPrompt, userContent);
+    const out = normalizeDeck(parsed);
 
     const { data: row, error } = await context.supabase
       .from("flashcard_decks")
@@ -252,17 +335,14 @@ export const generateDeck = createServerFn({ method: "POST" })
         user_id: context.userId,
         title: data.topic,
         topic: data.topic,
-        cards: experimental_output.cards,
+        cards: out.cards,
       })
       .select()
       .single();
     if (error) throw new Error(error.message);
 
     await context.supabase.from("study_sessions").insert({
-      user_id: context.userId,
-      activity: "deck_generated",
-      minutes: 3,
-      xp: 10,
+      user_id: context.userId, activity: "deck_generated", minutes: 3, xp: 10,
     });
     return row;
   });
