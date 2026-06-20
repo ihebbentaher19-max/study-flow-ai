@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
 import { generateDeck } from "@/lib/ai.functions";
 import { toast } from "sonner";
-import { Layers, Sparkles, Trash2, X, ChevronLeft, ChevronRight, Shuffle } from "lucide-react";
+import { Layers, Sparkles, Trash2, X, ChevronLeft, ChevronRight, Shuffle, Upload, FileText, Image as ImageIcon } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 type Card = { front: string; back: string };
@@ -15,11 +15,16 @@ export const Route = createFileRoute("/_authenticated/flashcards")({
   component: FlashcardsPage,
 });
 
+const ACCEPTED = "image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown";
+const MAX_BYTES = 20 * 1024 * 1024;
+
 function FlashcardsPage() {
   const qc = useQueryClient();
   const generate = useServerFn(generateDeck);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [topic, setTopic] = useState("");
   const [notes, setNotes] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [count, setCount] = useState(8);
   const [loading, setLoading] = useState(false);
   const [active, setActive] = useState<any | null>(null);
@@ -33,13 +38,32 @@ function FlashcardsPage() {
     },
   });
 
+  function pickFile(f: File | null) {
+    if (!f) return setFile(null);
+    if (f.size > MAX_BYTES) { toast.error("File too large (max 20 MB)"); return; }
+    setFile(f);
+    if (!topic.trim()) setTopic(f.name.replace(/\.[^.]+$/, ""));
+  }
+
   async function onGenerate() {
-    if (!topic.trim() || notes.trim().length < 20) { toast.error("Add a topic and notes."); return; }
+    if (!topic.trim()) { toast.error("Add a topic."); return; }
+    if (!file && notes.trim().length < 20) { toast.error("Add notes or attach a file."); return; }
     setLoading(true);
     try {
-      await generate({ data: { topic, notes, count } });
+      if (file) {
+        const { data: u } = await supabase.auth.getUser();
+        if (!u.user) throw new Error("Not signed in");
+        const ext = file.name.split(".").pop() ?? "bin";
+        const path = `${u.user.id}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+        const up = await supabase.storage.from("study-uploads").upload(path, file, { contentType: file.type });
+        if (up.error) throw up.error;
+        await generate({ data: { topic, count, storage_path: path, mime_type: file.type } });
+      } else {
+        await generate({ data: { topic, notes, count } });
+      }
       toast.success("Deck ready!");
-      setTopic(""); setNotes("");
+      setTopic(""); setNotes(""); setFile(null);
+      if (fileInput.current) fileInput.current.value = "";
       qc.invalidateQueries({ queryKey: ["decks"] });
     } catch (e: any) { toast.error(e.message ?? "Failed"); }
     finally { setLoading(false); }
@@ -49,17 +73,49 @@ function FlashcardsPage() {
     <div className="max-w-7xl mx-auto space-y-6">
       <div>
         <h1 className="text-3xl sm:text-4xl font-black">Flashcards</h1>
-        <p className="text-muted-foreground mt-1">Auto-generated decks with flip-card study mode.</p>
+        <p className="text-muted-foreground mt-1">Generate decks from notes, photos, or PDFs.</p>
       </div>
 
-      <div className="rounded-3xl bg-card border border-border p-6 shadow-soft">
+      <div
+        className="rounded-3xl bg-card border border-border p-6 shadow-soft"
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => { e.preventDefault(); pickFile(e.dataTransfer.files?.[0] ?? null); }}
+      >
         <div className="grid lg:grid-cols-3 gap-3">
           <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="Topic" className="lg:col-span-2 rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring" />
           <select value={count} onChange={(e) => setCount(Number(e.target.value))} className="rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring">
             {[6, 8, 10, 12, 16, 20].map(n => <option key={n} value={n}>{n} cards</option>)}
           </select>
         </div>
-        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={6} placeholder="Paste notes..." className="mt-3 w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring" />
+
+        {file ? (
+          <div className="mt-3 flex items-center gap-3 rounded-2xl border border-border bg-background px-4 py-3">
+            {file.type.startsWith("image/") ? <ImageIcon className="size-5 text-primary" /> : <FileText className="size-5 text-primary" />}
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold truncate">{file.name}</div>
+              <div className="text-xs text-muted-foreground">{(file.size/1024).toFixed(0)} KB · {file.type || "file"}</div>
+            </div>
+            <button onClick={() => { setFile(null); if (fileInput.current) fileInput.current.value = ""; }} className="p-1 text-muted-foreground hover:text-destructive"><X className="size-4" /></button>
+          </div>
+        ) : (
+          <>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={6} placeholder="Paste notes, or attach a photo/PDF below..." className="mt-3 w-full rounded-2xl border border-border bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring" />
+            <button
+              type="button"
+              onClick={() => fileInput.current?.click()}
+              className="mt-3 w-full rounded-2xl border-2 border-dashed border-border hover:border-primary hover:bg-primary/5 transition px-4 py-6 flex flex-col items-center gap-2 text-muted-foreground"
+            >
+              <Upload className="size-6" />
+              <div className="font-semibold">Upload a photo or PDF</div>
+              <div className="text-xs">PNG, JPG, WebP, PDF, TXT · up to 20 MB</div>
+            </button>
+          </>
+        )}
+        <input
+          ref={fileInput} type="file" accept={ACCEPTED} className="hidden"
+          onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
+        />
+
         <div className="mt-3 flex justify-end">
           <button onClick={onGenerate} disabled={loading} className="rounded-full bg-gradient-primary text-primary-foreground font-bold px-6 py-3 shadow-glow inline-flex items-center gap-2 disabled:opacity-60">
             <Sparkles className="size-4" /> {loading ? "Generating..." : "Generate deck"}
