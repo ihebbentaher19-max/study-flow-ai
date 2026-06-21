@@ -210,7 +210,7 @@ export const generateSummary = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => SummarizeInput.parse(d))
   .handler(async ({ data, context }) => {
     const systemPrompt = `You are StudyFlow's AI tutor. Return ONLY a JSON object: {"summary": string (3-5 short paragraphs), "key_points": string[] (5-7 takeaways)}. No prose outside JSON.`;
-    const userContent = [{ type: "text", text: `Title: ${data.title}\n\nNOTES:\n${data.text}` }];
+    const userContent = { text: `Title: ${data.title}\n\nNOTES:\n${data.text}`, files: [] };
     const parsed = await callJsonAI(systemPrompt, userContent);
     const out = z.object({
       summary: z.string(),
