@@ -398,9 +398,9 @@ export const getRecommendations = createServerFn({ method: "POST" })
       context.supabase.from("quizzes").select("topic,best_score").limit(10),
     ]);
 
-    const gateway = getGateway();
+    const { provider, model } = getGateway();
     const { text } = await generateText({
-      model: gateway(MODEL),
+      model: provider(model),
       prompt: `You are a study coach. Based on this learner's recent activity, give 3 short, encouraging, specific recommendations (1 sentence each). Return as a plain numbered list.\n\nTASKS: ${JSON.stringify(tasks)}\nSESSIONS: ${JSON.stringify(sessions)}\nQUIZZES: ${JSON.stringify(quizzes)}`,
     });
     return { text };
