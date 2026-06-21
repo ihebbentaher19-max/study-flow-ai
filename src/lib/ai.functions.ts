@@ -118,11 +118,12 @@ async function buildUserContent(opts: {
 }
 
 async function callJsonAI(systemPrompt: string, userContent: any[]) {
-  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+  const p = getProvider();
+  const res = await fetch(p.endpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Lovable-API-Key": getKey() },
+    headers: p.headers,
     body: JSON.stringify({
-      model: MODEL,
+      model: p.model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
