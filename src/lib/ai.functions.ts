@@ -1,21 +1,61 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateText } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 
-const MODEL = "google/gemini-3-flash-preview";
+// Provider resolution:
+// 1. If LOVABLE_API_KEY is set (auto-provisioned on Lovable hosting), use Lovable AI Gateway.
+// 2. Else if GEMINI_API_KEY (or GOOGLE_GENERATIVE_AI_API_KEY) is set (typical local dev),
+//    fall back to Google's OpenAI-compatible endpoint directly.
+// This lets the same code work on Lovable preview/prod AND on the user's localhost.
+const LOVABLE_MODEL = "google/gemini-3-flash-preview";
+const GOOGLE_MODEL = "gemini-2.5-flash";
 
-function getGateway() {
-  const key = process.env.LOVABLE_API_KEY;
-  if (!key) throw new Error("LOVABLE_API_KEY missing");
-  return createLovableAiGatewayProvider(key);
+type ProviderInfo = {
+  endpoint: string;
+  headers: Record<string, string>;
+  model: string;
+};
+
+function getProvider(): ProviderInfo {
+  const lovable = process.env.LOVABLE_API_KEY;
+  if (lovable) {
+    return {
+      endpoint: "https://ai.gateway.lovable.dev/v1/chat/completions",
+      headers: { "Content-Type": "application/json", "Lovable-API-Key": lovable, "X-Lovable-AIG-SDK": "vercel-ai-sdk" },
+      model: LOVABLE_MODEL,
+    };
+  }
+  const google = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (google) {
+    return {
+      endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${google}` },
+      model: GOOGLE_MODEL,
+    };
+  }
+  throw new Error(
+    "No AI key configured. On Lovable this is automatic. Locally, add GEMINI_API_KEY=<your key> to .env.local (get one free at https://aistudio.google.com/apikey) and restart the dev server."
+  );
 }
 
-function getKey() {
-  const key = process.env.LOVABLE_API_KEY;
-  if (!key) throw new Error("LOVABLE_API_KEY missing");
-  return key;
+function getGateway() {
+  const lovable = process.env.LOVABLE_API_KEY;
+  if (lovable) {
+    return { provider: createLovableAiGatewayProvider(lovable), model: LOVABLE_MODEL };
+  }
+  const google = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (google) {
+    const provider = createOpenAICompatible({
+      name: "google",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+      headers: { Authorization: `Bearer ${google}` },
+    });
+    return { provider, model: GOOGLE_MODEL };
+  }
+  throw new Error("No AI key configured. Set LOVABLE_API_KEY or GEMINI_API_KEY.");
 }
 
 // ---------- Robust JSON extraction ----------
@@ -78,11 +118,12 @@ async function buildUserContent(opts: {
 }
 
 async function callJsonAI(systemPrompt: string, userContent: any[]) {
-  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+  const p = getProvider();
+  const res = await fetch(p.endpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Lovable-API-Key": getKey() },
+    headers: p.headers,
     body: JSON.stringify({
-      model: MODEL,
+      model: p.model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
@@ -357,9 +398,9 @@ export const getRecommendations = createServerFn({ method: "POST" })
       context.supabase.from("quizzes").select("topic,best_score").limit(10),
     ]);
 
-    const gateway = getGateway();
+    const { provider, model } = getGateway();
     const { text } = await generateText({
-      model: gateway(MODEL),
+      model: provider(model),
       prompt: `You are a study coach. Based on this learner's recent activity, give 3 short, encouraging, specific recommendations (1 sentence each). Return as a plain numbered list.\n\nTASKS: ${JSON.stringify(tasks)}\nSESSIONS: ${JSON.stringify(sessions)}\nQUIZZES: ${JSON.stringify(quizzes)}`,
     });
     return { text };
