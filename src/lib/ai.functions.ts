@@ -13,16 +13,26 @@ import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 const LOVABLE_MODEL = "google/gemini-3-flash-preview";
 const GOOGLE_MODEL = "gemini-2.5-flash";
 
-type ProviderInfo = {
-  endpoint: string;
-  headers: Record<string, string>;
-  model: string;
-};
+type ProviderInfo =
+  | {
+      kind: "lovable";
+      endpoint: string;
+      headers: Record<string, string>;
+      model: string;
+    }
+  | {
+      kind: "google";
+      endpoint: string;
+      headers: Record<string, string>;
+      model: string;
+      apiKey: string;
+    };
 
 function getProvider(): ProviderInfo {
   const lovable = process.env.LOVABLE_API_KEY;
   if (lovable) {
     return {
+      kind: "lovable",
       endpoint: "https://ai.gateway.lovable.dev/v1/chat/completions",
       headers: { "Content-Type": "application/json", "Lovable-API-Key": lovable, "X-Lovable-AIG-SDK": "vercel-ai-sdk" },
       model: LOVABLE_MODEL,
@@ -31,9 +41,11 @@ function getProvider(): ProviderInfo {
   const google = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (google) {
     return {
-      endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${google}` },
+      kind: "google",
+      endpoint: `https://generativelanguage.googleapis.com/v1beta/models/${GOOGLE_MODEL}:generateContent`,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": google },
       model: GOOGLE_MODEL,
+      apiKey: google,
     };
   }
   throw new Error(
@@ -57,6 +69,7 @@ function getGateway() {
   }
   throw new Error("No AI key configured. Set LOVABLE_API_KEY or GEMINI_API_KEY.");
 }
+
 
 // ---------- Robust JSON extraction ----------
 function extractJson(raw: string): any {
