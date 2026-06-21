@@ -13,16 +13,26 @@ import { createLovableAiGatewayProvider } from "./ai-gateway.server";
 const LOVABLE_MODEL = "google/gemini-3-flash-preview";
 const GOOGLE_MODEL = "gemini-2.5-flash";
 
-type ProviderInfo = {
-  endpoint: string;
-  headers: Record<string, string>;
-  model: string;
-};
+type ProviderInfo =
+  | {
+      kind: "lovable";
+      endpoint: string;
+      headers: Record<string, string>;
+      model: string;
+    }
+  | {
+      kind: "google";
+      endpoint: string;
+      headers: Record<string, string>;
+      model: string;
+      apiKey: string;
+    };
 
 function getProvider(): ProviderInfo {
   const lovable = process.env.LOVABLE_API_KEY;
   if (lovable) {
     return {
+      kind: "lovable",
       endpoint: "https://ai.gateway.lovable.dev/v1/chat/completions",
       headers: { "Content-Type": "application/json", "Lovable-API-Key": lovable, "X-Lovable-AIG-SDK": "vercel-ai-sdk" },
       model: LOVABLE_MODEL,
@@ -31,9 +41,11 @@ function getProvider(): ProviderInfo {
   const google = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (google) {
     return {
-      endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${google}` },
+      kind: "google",
+      endpoint: `https://generativelanguage.googleapis.com/v1beta/models/${GOOGLE_MODEL}:generateContent`,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": google },
       model: GOOGLE_MODEL,
+      apiKey: google,
     };
   }
   throw new Error(
@@ -58,6 +70,7 @@ function getGateway() {
   throw new Error("No AI key configured. Set LOVABLE_API_KEY or GEMINI_API_KEY.");
 }
 
+
 // ---------- Robust JSON extraction ----------
 function extractJson(raw: string): any {
   let s = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
@@ -81,6 +94,8 @@ function extractJson(raw: string): any {
 }
 
 // ---------- Multimodal user-content builder ----------
+// Returns a neutral shape: { text, files: [{mime, base64}] }
+// callJsonAI translates to the right wire format per provider.
 async function buildUserContent(opts: {
   title: string;
   instructionPrefix: string;
@@ -88,7 +103,7 @@ async function buildUserContent(opts: {
   storage_path?: string;
   mime_type?: string;
   supabase: any;
-}) {
+}): Promise<{ text: string; files: { mime: string; base64: string }[] }> {
   if (opts.storage_path && opts.mime_type) {
     const dl = await opts.supabase.storage.from("study-uploads").download(opts.storage_path);
     if (dl.error || !dl.data) throw new Error(dl.error?.message ?? "Could not read uploaded file");
@@ -96,29 +111,70 @@ async function buildUserContent(opts: {
     const base64 = buf.toString("base64");
     const mt = opts.mime_type;
     if (mt.startsWith("image/")) {
-      return [
-        { type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix} Extract content from this image.` },
-        { type: "image_url", image_url: { url: `data:${mt};base64,${base64}` } },
-      ];
+      return {
+        text: `Title: ${opts.title}\n${opts.instructionPrefix} Extract content from this image.`,
+        files: [{ mime: mt, base64 }],
+      };
     }
     if (mt === "application/pdf") {
-      return [
-        { type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix} Read this PDF.` },
-        { type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${base64}` } },
-      ];
+      return {
+        text: `Title: ${opts.title}\n${opts.instructionPrefix} Read this PDF.`,
+        files: [{ mime: "application/pdf", base64 }],
+      };
     }
     if (mt.startsWith("text/")) {
       const body = buf.toString("utf-8").slice(0, 20000);
-      return [{ type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix}\n\nNOTES:\n${body}` }];
+      return { text: `Title: ${opts.title}\n${opts.instructionPrefix}\n\nNOTES:\n${body}`, files: [] };
     }
     throw new Error("Unsupported file type");
   }
   if (!opts.text || opts.text.length < 20) throw new Error("Provide notes or attach a file");
-  return [{ type: "text", text: `Title: ${opts.title}\n${opts.instructionPrefix}\n\nNOTES:\n${opts.text.slice(0, 20000)}` }];
+  return {
+    text: `Title: ${opts.title}\n${opts.instructionPrefix}\n\nNOTES:\n${opts.text.slice(0, 20000)}`,
+    files: [],
+  };
 }
 
-async function callJsonAI(systemPrompt: string, userContent: any[]) {
+async function callJsonAI(
+  systemPrompt: string,
+  userContent: { text: string; files: { mime: string; base64: string }[] }
+) {
   const p = getProvider();
+
+  if (p.kind === "google") {
+    // Native Gemini API — supports inline_data for images AND PDFs.
+    const parts: any[] = [{ text: userContent.text }];
+    for (const f of userContent.files) {
+      parts.push({ inline_data: { mime_type: f.mime, data: f.base64 } });
+    }
+    const res = await fetch(p.endpoint, {
+      method: "POST",
+      headers: p.headers,
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: "user", parts }],
+        generationConfig: { responseMimeType: "application/json" },
+      }),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      if (res.status === 429) throw new Error("Rate limit reached. Please try again shortly.");
+      throw new Error(`AI error ${res.status}: ${txt.slice(0, 300)}`);
+    }
+    const json = await res.json();
+    const raw = json.candidates?.[0]?.content?.parts?.map((x: any) => x.text ?? "").join("") ?? "{}";
+    return extractJson(raw);
+  }
+
+  // Lovable AI Gateway — OpenAI-compatible.
+  const parts: any[] = [{ type: "text", text: userContent.text }];
+  for (const f of userContent.files) {
+    if (f.mime.startsWith("image/")) {
+      parts.push({ type: "image_url", image_url: { url: `data:${f.mime};base64,${f.base64}` } });
+    } else if (f.mime === "application/pdf") {
+      parts.push({ type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${f.base64}` } });
+    }
+  }
   const res = await fetch(p.endpoint, {
     method: "POST",
     headers: p.headers,
@@ -126,7 +182,7 @@ async function callJsonAI(systemPrompt: string, userContent: any[]) {
       model: p.model,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
+        { role: "user", content: parts },
       ],
       response_format: { type: "json_object" },
     }),
@@ -135,12 +191,13 @@ async function callJsonAI(systemPrompt: string, userContent: any[]) {
     const txt = await res.text();
     if (res.status === 429) throw new Error("Rate limit reached. Please try again shortly.");
     if (res.status === 402) throw new Error("AI credits exhausted. Please add credits in workspace billing.");
-    throw new Error(`AI error ${res.status}: ${txt.slice(0, 200)}`);
+    throw new Error(`AI error ${res.status}: ${txt.slice(0, 300)}`);
   }
   const json = await res.json();
   const raw = json.choices?.[0]?.message?.content ?? "{}";
   return extractJson(raw);
 }
+
 
 // ---------- Summarize ----------
 const SummarizeInput = z.object({
@@ -153,7 +210,7 @@ export const generateSummary = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => SummarizeInput.parse(d))
   .handler(async ({ data, context }) => {
     const systemPrompt = `You are StudyFlow's AI tutor. Return ONLY a JSON object: {"summary": string (3-5 short paragraphs), "key_points": string[] (5-7 takeaways)}. No prose outside JSON.`;
-    const userContent = [{ type: "text", text: `Title: ${data.title}\n\nNOTES:\n${data.text}` }];
+    const userContent = { text: `Title: ${data.title}\n\nNOTES:\n${data.text}`, files: [] };
     const parsed = await callJsonAI(systemPrompt, userContent);
     const out = z.object({
       summary: z.string(),
