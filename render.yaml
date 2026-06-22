@@ -5,9 +5,13 @@ services:
     region: oregon
     plan: starter
     buildCommand: bun install && bun run build
-    startCommand: node .output/server/index.mjs
+    startCommand: node --enable-source-maps .output/server/index.mjs
     envVars:
       - key: NODE_VERSION
         value: 24.14.1
       - key: PORT
         value: 3000
+      - key: NODE_ENV
+        value: production
+      - key: RENDER
+        value: "true"
